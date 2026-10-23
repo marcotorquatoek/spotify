@@ -30,6 +30,10 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--hot);outline-of
 .list a{color:var(--ink);font-weight:600;text-decoration:none}
 .list small{display:block;color:var(--mute);margin-top:2px}
 .err{color:var(--hot)}
+.acts{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.acts button,.acts a{padding:6px 12px;font-size:.85rem;border-radius:999px;text-decoration:none;background:var(--panel);color:var(--ink);border:1px solid #2b4259;font-weight:600}
+.acts .yes{background:var(--acc);color:#06241f;border:0}
+.list img.cov{width:72px;height:72px;border-radius:8px}
 .hide{display:none}
 details{margin-top:18px;color:var(--mute)}
 code{background:var(--panel);padding:2px 6px;border-radius:6px;color:var(--ink);word-break:break-all}
@@ -54,6 +58,7 @@ code{background:var(--panel);padding:2px 6px;border-radius:6px;color:var(--ink);
  <section id="app" class="hide">
   <div class="top"><div><h1 id="hello">Ciao</h1><p id="count"></p></div><button class="ghost" id="out">Esci</button></div>
   <div class="tabs" id="tabs"></div>
+  <div class="tabs hide" id="sub"></div>
   <input id="q" type="search" placeholder="Cerca un artista">
   <p id="status"></p>
   <ul class="list" id="list"></ul>
@@ -103,13 +108,14 @@ async function token(){
 async function api(path){
  const r=await fetch(path.startsWith('http')?path:'https://api.spotify.com/v1'+path,
   {headers:{Authorization:'Bearer '+await token()}});
- if(!r.ok)throw new Error('Spotify ha risposto '+r.status+' su '+path.split('?')[0]);
+ if(!r.ok){const e=new Error('Spotify ha risposto '+r.status+' su '+path.split('?')[0]);e.status=r.status;e.retry=Number(r.headers.get('Retry-After'))||2;throw e}
  return r.json();
 }
 
 /* ---------- Dati ---------- */
 const cache={};
 const TABS=[
+ {id:'news',label:'Novità'},
  {id:'follow',label:'Seguiti'},
  {id:'short_term',label:'Ultimo mese'},
  {id:'medium_term',label:'Ultimi 6 mesi'},
@@ -117,6 +123,7 @@ const TABS=[
 ];
 async function load(id){
  if(cache[id])return cache[id];
+ if(id==='news')return cache.news=await loadNews();
  let out=[];
  if(id==='follow'){
   let url='/me/following?type=artist&limit=50';
@@ -129,9 +136,61 @@ async function load(id){
  return cache[id]=out;
 }
 
+/* ---------- Novità ---------- */
+const DAYS=21;
+const seen=(()=>{try{return JSON.parse(st.get('seen')||'{}')}catch(e){return {}}})();
+let view='todo';
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function mark(id,v){if(v)seen[id]=v;else delete seen[id];st.set('seen',JSON.stringify(seen));render()}
+async function loadNews(){
+ const artists=await load('follow');
+ const since=new Date(Date.now()-DAYS*864e5).toISOString().slice(0,10);
+ const out=new Map(),q=[...artists];
+ let done=0,errs=0,first='';
+ async function worker(){
+  while(q.length){
+   const a=q.shift();
+   try{
+    const d=await api('/artists/'+a.id+'/albums?include_groups=album,single&market=IT&limit=10');
+    d.items.filter(x=>x.release_date_precision==='day'&&x.release_date>=since).forEach(x=>out.set(x.id,x));
+   }catch(e){
+    if(e.status===429){q.push(a);await sleep(e.retry*1000);continue}
+    errs++;first=first||e.message;
+   }
+   $('#status').textContent='Controllo gli artisti '+(++done)+'/'+artists.length+'…';
+  }
+ }
+ await Promise.all([worker(),worker(),worker(),worker()]);
+ if(artists.length&&errs===artists.length)throw new Error('Non riesco a leggere le uscite degli artisti. '+first);
+ return [...out.values()].sort((a,b)=>b.release_date.localeCompare(a.release_date));
+}
+function renderNews(){
+ const all=cache.news||[];
+ const q=$('#q').value.trim().toLowerCase();
+ const stOf=a=>seen[a.id]||'todo';
+ $('#sub').innerHTML=[['todo','Da ascoltare'],['ok','Ascoltate'],['no','Scartate']].map(x=>
+  '<button data-v="'+x[0]+'"'+(view===x[0]?' class="on"':'')+'>'+x[1]+' ('+all.filter(a=>stOf(a)===x[0]).length+')</button>').join('');
+ const items=all.filter(a=>stOf(a)===view&&(a.name+' '+a.artists.map(x=>x.name).join(' ')).toLowerCase().includes(q));
+ $('#count').textContent=cache.news?items.length+' uscite negli ultimi '+DAYS+' giorni':'';
+ $('#list').innerHTML=items.map(a=>{
+  const im=a.images||[],img=im.length?im[Math.min(1,im.length-1)].url:'';
+  const url=a.external_urls&&a.external_urls.spotify||'#';
+  const acts=view==='todo'
+   ?'<button class="yes" data-a="ok" data-id="'+esc(a.id)+'">Ascoltata</button><button data-a="no" data-id="'+esc(a.id)+'">Scarta</button>'
+   :'<button data-a="todo" data-id="'+esc(a.id)+'">Rimetti da ascoltare</button>';
+  return '<li>'+(img?'<img class="cov" loading="lazy" alt="" src="'+esc(img)+'">':'<div class="ph"></div>')+
+   '<div><a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(a.name)+'</a>'+
+   '<small>'+esc(a.artists.map(x=>x.name).join(', '))+'</small>'+
+   '<small>'+esc(a.release_date)+' - '+(a.album_type==='single'?'Singolo':'Album')+', '+a.total_tracks+' brani</small>'+
+   '<div class="acts"><a href="'+esc(url)+'" target="_blank" rel="noopener">Apri</a>'+acts+'</div></div></li>';
+ }).join('');
+}
+function listClick(e){const b=e.target.closest('button[data-a]');if(b)mark(b.dataset.id,b.dataset.a==='todo'?null:b.dataset.a)}
+
 /* ---------- Interfaccia ---------- */
 let cur='follow';
 function render(){
+ if(cur==='news')return renderNews();
  const q=$('#q').value.trim().toLowerCase();
  const items=(cache[cur]||[]).filter(a=>a.name.toLowerCase().includes(q));
  $('#count').textContent=(cache[cur]?items.length+' artisti':'');
@@ -144,7 +203,7 @@ function render(){
  }).join('');
 }
 async function show(id){
- cur=id;
+ cur=id;$('#sub').classList.toggle('hide',id!=='news');
  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.id===id));
  $('#status').textContent='Caricamento…';$('#status').className='';
  try{await load(id);$('#status').textContent=''}
@@ -155,16 +214,17 @@ async function start(){
  $('#login').classList.add('hide');$('#app').classList.remove('hide');
  $('#tabs').innerHTML=TABS.map(t=>'<button data-id="'+t.id+'">'+t.label+'</button>').join('');
  $('#tabs').onclick=e=>{if(e.target.dataset.id)show(e.target.dataset.id)};
- $('#q').oninput=render;
+ $('#q').oninput=render;$('#list').onclick=listClick;
+ $('#sub').onclick=e=>{if(e.target.dataset.v){view=e.target.dataset.v;render()}};
  try{const me=await api('/me');$('#hello').textContent='Ciao '+(me.display_name||'')}catch(e){}
- show('follow');
+ show('news');
 }
 
 /* ---------- Avvio ---------- */
 $('#ru').textContent=REDIRECT;
 $('#cid').value=st.get('cid')||'';
 $('#go').onclick=login;
-$('#out').onclick=()=>{st.clear();location.href=REDIRECT};
+$('#out').onclick=()=>{['at','exp','rt'].forEach(k=>{try{localStorage.removeItem(k)}catch(e){}});location.href=REDIRECT};
 (async()=>{
  const p=new URLSearchParams(location.search);
  if(p.get('error')){$('#msg').textContent='Accesso annullato.';history.replaceState({},'',REDIRECT)}
