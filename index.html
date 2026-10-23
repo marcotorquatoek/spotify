@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>I miei artisti</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0e1a26;--panel:#16283a;--ink:#f3ecda;--mute:#8fa3b5;--acc:#27d3bd;--hot:#ff5c8a;
+ --f:'Bricolage Grotesque',system-ui,-apple-system,'Segoe UI',sans-serif;
+ box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f)}
+main{max-width:640px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:2rem;font-weight:800;margin:8px 0 4px;letter-spacing:-.02em}
+p{color:var(--mute);line-height:1.5;margin:6px 0}
+input,button{font:inherit}
+input{width:100%;padding:12px 14px;border-radius:10px;border:1px solid #2b4259;background:var(--panel);color:var(--ink);margin:8px 0}
+button{cursor:pointer;border:0;border-radius:999px;padding:12px 20px;font-weight:600;background:var(--acc);color:#06241f}
+button.ghost{background:transparent;color:var(--mute);border:1px solid #2b4259;padding:8px 14px}
+button:focus-visible,input:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.tabs{display:flex;gap:8px;overflow-x:auto;padding:14px 0 6px}
+.tabs button{background:var(--panel);color:var(--ink);white-space:nowrap;padding:9px 16px}
+.tabs button.on{background:var(--hot);color:#2a0612}
+.list{list-style:none;padding:0;margin:8px 0}
+.list li{display:flex;gap:14px;align-items:center;padding:10px 0;border-bottom:1px solid #1f3348}
+.list img,.ph{width:56px;height:56px;border-radius:50%;object-fit:cover;background:var(--panel);flex:none}
+.list a{color:var(--ink);font-weight:600;text-decoration:none}
+.list small{display:block;color:var(--mute);margin-top:2px}
+.err{color:var(--hot)}
+.hide{display:none}
+details{margin-top:18px;color:var(--mute)}
+code{background:var(--panel);padding:2px 6px;border-radius:6px;color:var(--ink);word-break:break-all}
+</style>
+</head>
+<body>
+<main>
+ <section id="login">
+  <h1>I miei artisti</h1>
+  <p>Accedi con Spotify per vedere gli artisti che segui e quelli che ascolti di più.</p>
+  <input id="cid" placeholder="Client ID di Spotify" autocomplete="off">
+  <button id="go">Accedi con Spotify</button>
+  <p id="msg" class="err"></p>
+  <details>
+   <summary>Prima configurazione</summary>
+   <p>1. Su developer.spotify.com crea un'app (API: Web API).<br>
+   2. Nelle impostazioni dell'app aggiungi come Redirect URI questo indirizzo esatto:<br><code id="ru"></code><br>
+   3. Copia il Client ID qui sopra e premi Accedi.</p>
+  </details>
+ </section>
+
+ <section id="app" class="hide">
+  <div class="top"><div><h1 id="hello">Ciao</h1><p id="count"></p></div><button class="ghost" id="out">Esci</button></div>
+  <div class="tabs" id="tabs"></div>
+  <input id="q" type="search" placeholder="Cerca un artista">
+  <p id="status"></p>
+  <ul class="list" id="list"></ul>
+ </section>
+</main>
+
+<script>
+const $=s=>document.querySelector(s);
+const SCOPES='user-follow-read user-top-read';
+const REDIRECT=location.origin+location.pathname;
+const st={
+ get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},
+ set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}},
+ clear:()=>{try{localStorage.clear()}catch(e){}}
+};
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const b64=buf=>btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+
+/* ---------- Login (PKCE, nessun segreto nel browser) ---------- */
+async function login(){
+ const id=$('#cid').value.trim();
+ if(!id){$('#msg').textContent='Inserisci il Client ID.';return}
+ st.set('cid',id);
+ const v=b64(crypto.getRandomValues(new Uint8Array(48)));
+ st.set('verifier',v);
+ const ch=b64(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(v)));
+ const p=new URLSearchParams({client_id:id,response_type:'code',redirect_uri:REDIRECT,scope:SCOPES,code_challenge_method:'S256',code_challenge:ch});
+ location.href='https://accounts.spotify.com/authorize?'+p;
+}
+async function tokenReq(body){
+ const r=await fetch('https://accounts.spotify.com/api/token',{method:'POST',
+  headers:{'Content-Type':'application/x-www-form-urlencoded'},
+  body:new URLSearchParams({client_id:st.get('cid'),...body})});
+ if(!r.ok)throw new Error('Accesso non riuscito ('+r.status+'). Controlla Client ID e Redirect URI.');
+ const t=await r.json();
+ st.set('at',t.access_token);
+ st.set('exp',String(Date.now()+t.expires_in*1000-60000));
+ if(t.refresh_token)st.set('rt',t.refresh_token);
+}
+async function token(){
+ if(Date.now()<Number(st.get('exp')||0))return st.get('at');
+ const rt=st.get('rt');
+ if(!rt)throw new Error('Sessione scaduta. Accedi di nuovo.');
+ await tokenReq({grant_type:'refresh_token',refresh_token:rt});
+ return st.get('at');
+}
+async function api(path){
+ const r=await fetch(path.startsWith('http')?path:'https://api.spotify.com/v1'+path,
+  {headers:{Authorization:'Bearer '+await token()}});
+ if(!r.ok)throw new Error('Spotify ha risposto '+r.status+' su '+path.split('?')[0]);
+ return r.json();
+}
+
+/* ---------- Dati ---------- */
+const cache={};
+const TABS=[
+ {id:'follow',label:'Seguiti'},
+ {id:'short_term',label:'Ultimo mese'},
+ {id:'medium_term',label:'Ultimi 6 mesi'},
+ {id:'long_term',label:'Sempre'}
+];
+async function load(id){
+ if(cache[id])return cache[id];
+ let out=[];
+ if(id==='follow'){
+  let url='/me/following?type=artist&limit=50';
+  while(url){const d=await api(url);out.push(...d.artists.items);url=d.artists.next}
+  out.sort((a,b)=>a.name.localeCompare(b.name,'it'));
+ }else{
+  const d=await api('/me/top/artists?limit=50&time_range='+id);
+  out=d.items;
+ }
+ return cache[id]=out;
+}
+
+/* ---------- Interfaccia ---------- */
+let cur='follow';
+function render(){
+ const q=$('#q').value.trim().toLowerCase();
+ const items=(cache[cur]||[]).filter(a=>a.name.toLowerCase().includes(q));
+ $('#count').textContent=(cache[cur]?items.length+' artisti':'');
+ $('#list').innerHTML=items.map(a=>{
+  const img=a.images&&a.images.length?a.images[a.images.length-1].url:'';
+  const g=(a.genres||[]).slice(0,3).join(', ');
+  const url=a.external_urls&&a.external_urls.spotify||'#';
+  return '<li>'+(img?'<img loading="lazy" alt="" src="'+esc(img)+'">':'<div class="ph"></div>')+
+   '<div><a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(a.name)+'</a>'+(g?'<small>'+esc(g)+'</small>':'')+'</div></li>';
+ }).join('');
+}
+async function show(id){
+ cur=id;
+ document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.id===id));
+ $('#status').textContent='Caricamento…';$('#status').className='';
+ try{await load(id);$('#status').textContent=''}
+ catch(e){$('#status').textContent=e.message;$('#status').className='err'}
+ render();
+}
+async function start(){
+ $('#login').classList.add('hide');$('#app').classList.remove('hide');
+ $('#tabs').innerHTML=TABS.map(t=>'<button data-id="'+t.id+'">'+t.label+'</button>').join('');
+ $('#tabs').onclick=e=>{if(e.target.dataset.id)show(e.target.dataset.id)};
+ $('#q').oninput=render;
+ try{const me=await api('/me');$('#hello').textContent='Ciao '+(me.display_name||'')}catch(e){}
+ show('follow');
+}
+
+/* ---------- Avvio ---------- */
+$('#ru').textContent=REDIRECT;
+$('#cid').value=st.get('cid')||'';
+$('#go').onclick=login;
+$('#out').onclick=()=>{st.clear();location.href=REDIRECT};
+(async()=>{
+ const p=new URLSearchParams(location.search);
+ if(p.get('error')){$('#msg').textContent='Accesso annullato.';history.replaceState({},'',REDIRECT)}
+ else if(p.get('code')){
+  try{
+   await tokenReq({grant_type:'authorization_code',code:p.get('code'),redirect_uri:REDIRECT,code_verifier:st.get('verifier')});
+   history.replaceState({},'',REDIRECT);
+  }catch(e){$('#msg').textContent=e.message;return}
+ }
+ if(st.get('rt'))start();
+})();
+</script>
+</body>
+</html>
